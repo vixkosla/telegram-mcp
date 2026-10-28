@@ -1,0 +1,27 @@
+{
+  "name": "telegram-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for a personal Telegram account: read, search, download media, send only with explicit confirmation.",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": {
+    "telegram-mcp": "server.mjs"
+  },
+  "files": [
+    "server.mjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "SonicXBoy (https://sonicxboy.dev)",
+  "homepage": "https://sonicxboy.dev/products/telegram-mcp/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vixkosla/telegram-mcp.git"
+  },
+  "keywords": ["mcp", "telegram", "mtproto", "claude-code", "codex", "ai-agent"],
+  "dependencies": {
+    "telegram": "2.26.22"
+  }
+}

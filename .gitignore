@@ -1,0 +1,6 @@
+node_modules/
+session.txt
+pending.json
+downloads/
+config.json
+*.before-*
