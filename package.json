@@ -4,6 +4,9 @@
   "description": "MCP server for a personal Telegram account: read, search, download media, send only with explicit confirmation.",
   "type": "module",
   "main": "server.mjs",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "bin": {
     "telegram-mcp": "server.mjs"
   },

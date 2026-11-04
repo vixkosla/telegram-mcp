@@ -96,6 +96,12 @@ at my.telegram.org, put `apiId`/`apiHash` in
 `~/.config/telegram-mcp/config.json`, run `node server.mjs login`, then add
 `node /path/to/server.mjs` to your MCP client.
 
+## Проверка изменений
+
+После `npm ci` запустите `npm test`. Тесты вызывают MCP-сервер через stdio
+с подставным Telegram-клиентом и временными файлами. Ключи и вход в Telegram
+не нужны; тесты не обращаются к сети или рабочей сессии.
+
 ## Лицензия
 
 MIT © SonicXBoy

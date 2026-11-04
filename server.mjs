@@ -135,13 +135,24 @@ function makeClient(sessionString) {
   return { client, config };
 }
 
+async function destroyClient(client) {
+  try {
+    // These clients will not be reused. Stop GramJS's update loop as well as
+    // disconnecting its senders, including after a partially failed connect().
+    await client.destroy();
+  } catch (error) {
+    // Cleanup must not replace the original authentication or storage error.
+    console.error("Telegram client cleanup failed:", publicError(error));
+  }
+}
+
 async function disconnectCached() {
   const current = clientPromise;
   clientPromise = null;
   if (!current) return;
   try {
     const client = await current;
-    if (client?.connected) await client.disconnect();
+    if (client) await destroyClient(client);
   } catch {}
 }
 
@@ -163,14 +174,18 @@ async function openAuthorized() {
     throw error;
   }
   const { client } = makeClient(saved);
-  await client.connect();
-  if (!(await client.checkAuthorization())) {
-    await client.disconnect();
-    const error = new Error("Сохранённая сессия не авторизована. Повтори login_send_code.");
-    error.code = "AUTH";
+  try {
+    await client.connect();
+    if (!(await client.checkAuthorization())) {
+      const error = new Error("Сохранённая сессия не авторизована. Повтори login_send_code.");
+      error.code = "AUTH";
+      throw error;
+    }
+    return client;
+  } catch (error) {
+    await destroyClient(client);
     throw error;
   }
-  return client;
 }
 
 function mapMe(user) {
@@ -387,25 +402,27 @@ async function loginSendCode(args) {
   if (!/^\+\d{8,15}$/.test(phone)) throw new Error("Телефон в международном формате, например +79990001122");
   await disconnectCached();
   const { client, config } = makeClient("");
-  await client.connect();
-  if (await client.checkAuthorization()) {
-    await client.disconnect();
-    throw new Error("Эта пустая сессия неожиданно уже авторизована");
+  try {
+    await client.connect();
+    if (await client.checkAuthorization()) {
+      throw new Error("Эта пустая сессия неожиданно уже авторизована");
+    }
+    const sent = await client.sendCode({ apiId: config.apiId, apiHash: config.apiHash }, phone);
+    writePrivate(pendingFile, JSON.stringify({
+      phone,
+      phoneCodeHash: sent.phoneCodeHash,
+      isCodeViaApp: sent.isCodeViaApp,
+      session: client.session.save(),
+      createdAt: new Date().toISOString(),
+    }));
+    return {
+      sent: true,
+      delivery: sent.isCodeViaApp ? "код придёт сообщением в Telegram" : "код придёт по SMS",
+      next: "Передай код в login_sign_in. Если включена облачная парольная фраза, вторым вызовом передай password.",
+    };
+  } finally {
+    await destroyClient(client);
   }
-  const sent = await client.sendCode({ apiId: config.apiId, apiHash: config.apiHash }, phone);
-  writePrivate(pendingFile, JSON.stringify({
-    phone,
-    phoneCodeHash: sent.phoneCodeHash,
-    isCodeViaApp: sent.isCodeViaApp,
-    session: client.session.save(),
-    createdAt: new Date().toISOString(),
-  }));
-  await client.disconnect();
-  return {
-    sent: true,
-    delivery: sent.isCodeViaApp ? "код придёт сообщением в Telegram" : "код придёт по SMS",
-    next: "Передай код в login_sign_in. Если включена облачная парольная фраза, вторым вызовом передай password.",
-  };
 }
 
 async function loginSignIn(args) {
@@ -418,44 +435,50 @@ async function loginSignIn(args) {
   }
   await disconnectCached();
   const { client, config } = makeClient(pending.session);
-  await client.connect();
-  const credentials = { apiId: config.apiId, apiHash: config.apiHash };
-  const password = String(args.password || "");
-  const finishPassword = async () => client.signInWithPassword(credentials, {
-    password: async () => password,
-    onError: async (error) => { throw error; },
-  });
-  let user;
-  if (pending.needsPassword) {
-    if (!password) {
-      await client.disconnect();
-      return { needsPassword: true, next: "Нужен облачный пароль в поле password." };
-    }
-    user = await finishPassword();
-  } else {
-    try {
-      const result = await client.invoke(new Api.auth.SignIn({
-        phoneNumber: pending.phone,
-        phoneCodeHash: pending.phoneCodeHash,
-        phoneCode: String(args.code || "").trim(),
-      }));
-      if (result instanceof Api.auth.AuthorizationSignUpRequired) throw new Error("Этот номер не зарегистрирован в Telegram");
-      user = result.user;
-    } catch (error) {
-      const rpc = `${error?.errorMessage || ""} ${error?.message || ""}`;
-      if (!rpc.includes("SESSION_PASSWORD_NEEDED")) throw error;
+  let cached = false;
+  try {
+    await client.connect();
+    const credentials = { apiId: config.apiId, apiHash: config.apiHash };
+    const password = String(args.password || "");
+    const finishPassword = async () => client.signInWithPassword(credentials, {
+      password: async () => password,
+      onError: async (error) => { throw error; },
+    });
+    let user;
+    if (pending.needsPassword) {
       if (!password) {
-        writePrivate(pendingFile, JSON.stringify({ ...pending, session: client.session.save(), needsPassword: true }));
-        await client.disconnect();
-        return { needsPassword: true, next: "На аккаунте облачный пароль. Повтори login_sign_in с тем же code и полем password." };
+        return { needsPassword: true, next: "Нужен облачный пароль в поле password." };
       }
       user = await finishPassword();
+    } else {
+      try {
+        const result = await client.invoke(new Api.auth.SignIn({
+          phoneNumber: pending.phone,
+          phoneCodeHash: pending.phoneCodeHash,
+          phoneCode: String(args.code || "").trim(),
+        }));
+        if (result instanceof Api.auth.AuthorizationSignUpRequired) throw new Error("Этот номер не зарегистрирован в Telegram");
+        user = result.user;
+      } catch (error) {
+        const rpc = `${error?.errorMessage || ""} ${error?.message || ""}`;
+        if (!rpc.includes("SESSION_PASSWORD_NEEDED")) throw error;
+        // Preserve the password step even if an inline password is incorrect.
+        writePrivate(pendingFile, JSON.stringify({ ...pending, session: client.session.save(), needsPassword: true }));
+        if (!password) {
+          return { needsPassword: true, next: "На аккаунте облачный пароль. Повтори login_sign_in с тем же code и полем password." };
+        }
+        user = await finishPassword();
+      }
     }
+    writePrivate(sessionFile, client.session.save());
+    rmSync(pendingFile, { force: true });
+    const result = { authorized: true, me: mapMe(user) };
+    clientPromise = Promise.resolve(client);
+    cached = true;
+    return result;
+  } finally {
+    if (!cached) await destroyClient(client);
   }
-  writePrivate(sessionFile, client.session.save());
-  rmSync(pendingFile, { force: true });
-  clientPromise = Promise.resolve(client);
-  return { authorized: true, me: mapMe(user) };
 }
 
 async function logout(args) {
